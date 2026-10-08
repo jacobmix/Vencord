@@ -21,6 +21,15 @@ function isSeasonalSoundpack(soundpack: unknown): boolean {
     return typeof soundpack === "string" && SEASONAL_SOUNDPACKS.has(soundpack);
 }
 
+function setClassicSoundpack() {
+    logger.info("Forcing classic soundpack");
+
+    FluxDispatcher.dispatch({
+        type: "SET_SOUNDPACK",
+        soundpack: "classic",
+    });
+}
+
 function patchSoundpackDispatch() {
     if (originalDispatch) return;
 
@@ -56,17 +65,20 @@ export default definePlugin({
     name: "NoSeasonalStuff",
 
     description:
-        "Prevents Discord from automatically switching to seasonal sound packs and other seasonal effects.",
+        "Prevents Discord from using seasonal sound packs and resets them to the classic sound pack.",
 
     authors: [
         {
             name: "JacobMIX",
-            id: 104027164143267840,
+            id: 104027164143267840n,
         },
     ],
 
     start() {
         patchSoundpackDispatch();
+
+        // Reset an already-active seasonal soundpack.
+        setClassicSoundpack();
 
         logger.info("Seasonal soundpack protection enabled");
     },
