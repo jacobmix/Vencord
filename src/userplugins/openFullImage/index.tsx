@@ -9,18 +9,27 @@ import { OpenExternalIcon } from "@components/Icons";
 import definePlugin from "@utils/types";
 import { Menu } from "@webpack/common";
 
+const DISCORD_IMAGE_HOSTS = new Set([
+    "cdn.discordapp.com",
+    "media.discordapp.net",
+    "media.discordapp.com",
+]);
+
 function getFullImageUrl(src: unknown): string | null {
     if (typeof src !== "string") return null;
 
     try {
         const url = new URL(src);
-        if (url.protocol !== "https:" || !/(^|\.)discord(app)?\.com$/i.test(url.hostname)) return null;
+        if (url.protocol !== "https:" || !DISCORD_IMAGE_HOSTS.has(url.hostname.toLowerCase())) return null;
 
-        // Discord adds these parameters to request a resized preview. Preserve
-        // signed attachment parameters and format, which may be needed to load it.
-        url.searchParams.delete("width");
-        url.searchParams.delete("height");
-        url.searchParams.delete("size");
+        // Media proxy URLs point at the same attachment through a resize/transcode endpoint.
+        // Switch to the CDN and remove presentation options to request the original file.
+        if (url.hostname.toLowerCase() === "media.discordapp.net" && url.pathname.startsWith("/attachments/"))
+            url.hostname = "cdn.discordapp.com";
+
+        for (const parameter of ["width", "height", "size", "format", "quality", ""]) {
+            url.searchParams.delete(parameter);
+        }
 
         return url.toString();
     } catch {
@@ -52,5 +61,3 @@ export default definePlugin({
         "image-context": imageContextMenuPatch,
     },
 });
-
-
