@@ -172,19 +172,10 @@ export default definePlugin({
                 },
                 {
                     match: /(?<=null!=(\i)\?.{0,20})\i(?:\.\i)?,{children:\1/, // TODO: (?:\.\i)? is stable compat
-                    replace: "'div',{onClick:e=>e.stopPropagation(),children:$1"
+                    replace: "'div',{onClick:e=>e.target instanceof Element&&e.target.closest('img,video')&&e.stopPropagation(),children:$1"
                 }
             ]
         },
-        // Make media viewer options not hide when zoomed in with the default Discord feature
-        {
-            find: '="FOCUS_SENSITIVE",',
-            replacement: {
-                match: /(?<=\[\i\.\i]:)\i&&!\i&&"PINNED"!==\i/,
-                replace: "false"
-            }
-        },
-
         {
             find: ".handleImageLoad)",
             replacement: [
