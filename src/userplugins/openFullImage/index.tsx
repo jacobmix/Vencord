@@ -22,8 +22,6 @@ function getFullImageUrl(src: unknown): string | null {
         const url = new URL(src);
         if (url.protocol !== "https:" || !DISCORD_IMAGE_HOSTS.has(url.hostname.toLowerCase())) return null;
 
-        // Media proxy URLs point at the same attachment through a resize/transcode endpoint.
-        // Switch to the CDN and remove presentation options to request the original file.
         if (url.hostname.toLowerCase() === "media.discordapp.net" && url.pathname.startsWith("/attachments/"))
             url.hostname = "cdn.discordapp.com";
 
@@ -38,15 +36,18 @@ function getFullImageUrl(src: unknown): string | null {
 }
 
 const imageContextMenuPatch: NavContextMenuPatchCallback = (children, props) => {
-    const url = getFullImageUrl(props?.src || props?.href);
-    if (!url) return;
+    const viewerImage = document.querySelector<HTMLImageElement>('[role="dialog"] img');
+    const viewerVideo = document.querySelector<HTMLVideoElement>('[role="dialog"] video');
+    const url = getFullImageUrl(
+        props?.src || props?.href || props?.target?.src || props?.target?.href || viewerImage?.currentSrc || viewerImage?.src || viewerVideo?.currentSrc
+    );
 
     children.push(
         <Menu.MenuItem
             id="open-full-image-in-browser"
             label="Open Full Image in Browser"
             leadingAccessory={{ type: "icon", icon: OpenExternalIcon }}
-            action={() => open(url, "_blank")}
+            action={() => url && open(url, "_blank")}
         />
     );
 };
@@ -61,4 +62,3 @@ export default definePlugin({
         "image-context": imageContextMenuPatch,
     },
 });
-
