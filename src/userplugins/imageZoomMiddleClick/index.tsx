@@ -172,9 +172,17 @@ export default definePlugin({
                 },
                 {
                     match: /(?<=null!=(\i)\?.{0,20})\i(?:\.\i)?,{children:\1/, // TODO: (?:\.\i)? is stable compat
-                    replace: "'div',{onClick:e=>e.target instanceof Element&&e.target.closest('img,video')&&e.stopPropagation(),children:$1"
+                    replace: "'div',{onClick:e=>e.target instanceof Element&&!e.target.closest('button,[role=button],a,[aria-label]')&&e.stopPropagation(),children:$1"
                 }
             ]
+        },
+        // Keep the native media viewer controls available after Discord zooms the image.
+        {
+            find: '="FOCUS_SENSITIVE",',
+            replacement: {
+                match: /(?<=\[\i\.\i]:)\i&&!\i&&"PINNED"!==\i/,
+                replace: "false"
+            }
         },
         {
             find: ".handleImageLoad)",
