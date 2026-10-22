@@ -1,286 +1,163 @@
 /*
  * Vencord, a modification for Discord's desktop app
- * Copyright (c) 2023 Vendicated and contributors
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
+ * Copyright (c) 2026 Vencord contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
 
-import { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import { definePluginSettings } from "@api/Settings";
-import { debounce } from "@shared/debounce";
 import { Devs } from "@utils/constants";
-import { Logger } from "@utils/Logger";
 import definePlugin, { OptionType } from "@utils/types";
-import { createRoot, Menu } from "@webpack/common";
-import { JSX } from "react";
-import type { Root } from "react-dom/client";
-
-import { Magnifier, MagnifierProps } from "./components/Magnifier";
-import { ELEMENT_ID } from "./constants";
 import managedStyle from "./styles.css?managed";
 
-export const settings = definePluginSettings({
-    saveZoomValues: {
-        type: OptionType.BOOLEAN,
-        description: "Whether to save zoom and lens size values",
-        default: true,
-    },
-
-    invertScroll: {
-        type: OptionType.BOOLEAN,
-        description: "Invert scroll",
-        default: true,
-    },
-
-    nearestNeighbour: {
-        type: OptionType.BOOLEAN,
-        description: "Use Nearest Neighbour Interpolation when scaling images",
-        default: false,
-    },
-
-    square: {
-        type: OptionType.BOOLEAN,
-        description: "Make the lens square",
-        default: false,
-    },
-
-    zoom: {
-        description: "Zoom of the lens",
-        type: OptionType.SLIDER,
-        markers: [1, 5, 10, 20, 30, 40, 50],
-        default: 2,
-        stickToMarkers: false,
-    },
-    size: {
-        description: "Radius / Size of the lens",
-        type: OptionType.SLIDER,
-        markers: [50, 100, 250, 500, 750, 1000],
-        default: 100,
-        stickToMarkers: false,
-    },
-
-    zoomSpeed: {
-        description: "How fast the zoom / lens size changes",
-        type: OptionType.SLIDER,
-        markers: [0.1, 0.5, 1, 2, 3, 4, 5],
-        default: 0.5,
-        stickToMarkers: false,
-    },
+const settings = definePluginSettings({
+    saveZoomValues: { type: OptionType.BOOLEAN, description: "Save zoom and lens size changes", default: true },
+    invertScroll: { type: OptionType.BOOLEAN, description: "Invert scroll wheel adjustments", default: true },
+    nearestNeighbour: { type: OptionType.BOOLEAN, description: "Use nearest neighbour image scaling", default: false },
+    square: { type: OptionType.BOOLEAN, description: "Make the lens square", default: false },
+    zoom: { type: OptionType.SLIDER, description: "Lens zoom", markers: [1, 5, 10, 20, 30, 40, 50], default: 2, stickToMarkers: false },
+    size: { type: OptionType.SLIDER, description: "Lens diameter", markers: [50, 100, 250, 500, 750, 1000], default: 100, stickToMarkers: false },
+    zoomSpeed: { type: OptionType.SLIDER, description: "Scroll adjustment speed", markers: [0.1, 0.5, 1, 2, 3, 4, 5], default: 0.5, stickToMarkers: false },
 });
 
+type Media = HTMLImageElement | HTMLVideoElement;
+const PREFIX = "vc-imgzoom-middle";
 
-const imageContextMenuPatch: NavContextMenuPatchCallback = (children, props) => {
-    // Discord re-uses the image context menu for links to for the copy and open buttons
-    if ("href" in props) return;
-    // emojis in user statuses
-    if (props.target?.classList?.contains("emoji")) return;
+function sourceFor(media: Media) {
+    const src = media instanceof HTMLImageElement ? media.currentSrc || media.src : media.currentSrc || media.src;
+    try {
+        const url = new URL(src);
+        if (url.hostname === "media.discordapp.net") url.hostname = "cdn.discordapp.com";
+        for (const key of ["width", "height", "size", "format", "quality"]) url.searchParams.delete(key);
+        // Discord may append an empty query key when serving resized previews.
+        url.searchParams.delete("");
+        return url.toString();
+    } catch { return src; }
+}
 
-    const { square, nearestNeighbour } = settings.use(["square", "nearestNeighbour"]);
+function createLens(media: Media, x: number, y: number) {
+    const overlay = document.createElement("div");
+    const lens = document.createElement("div");
+    const rect = media.getBoundingClientRect();
+    const zoom = settings.store.zoom;
+    const size = settings.store.size;
+    const isVideo = media instanceof HTMLVideoElement;
+    const content = document.createElement(isVideo ? "video" : "img") as HTMLImageElement | HTMLVideoElement;
 
-    children.push(
-        <Menu.MenuGroup id="image-zoom-middle-click">
-            <Menu.MenuCheckboxItem
-                id="vc-middle-click-square"
-                label="Square Lens"
-                checked={square}
-                action={() => {
-                    settings.store.square = !square;
-                }}
-            />
-            <Menu.MenuCheckboxItem
-                id="vc-middle-click-nearest-neighbour"
-                label="Nearest Neighbour"
-                checked={nearestNeighbour}
-                action={() => {
-                    settings.store.nearestNeighbour = !nearestNeighbour;
-                }}
-            />
-            <Menu.MenuControlItem
-                id="vc-middle-click-zoom"
-                label="Zoom"
-                control={(props, ref) => (
-                    <Menu.MenuSliderControl
-                        ref={ref}
-                        {...props}
-                        minValue={1}
-                        maxValue={50}
-                        value={settings.store.zoom}
-                        onChange={debounce((value: number) => settings.store.zoom = value, 100)}
-                    />
-                )}
-            />
-            <Menu.MenuControlItem
-                id="vc-middle-click-size"
-                label="Lens Size"
-                control={(props, ref) => (
-                    <Menu.MenuSliderControl
-                        ref={ref}
-                        {...props}
-                        minValue={50}
-                        maxValue={1000}
-                        value={settings.store.size}
-                        onChange={debounce((value: number) => settings.store.size = value, 100)}
-                    />
-                )}
-            />
-            <Menu.MenuControlItem
-                id="vc-middle-click-zoom-speed"
-                label="Zoom Speed"
-                control={(props, ref) => (
-                    <Menu.MenuSliderControl
-                        ref={ref}
-                        {...props}
-                        minValue={0.1}
-                        maxValue={5}
-                        value={settings.store.zoomSpeed}
-                        onChange={debounce((value: number) => settings.store.zoomSpeed = value, 100)}
-                        renderValue={(value: number) => `${value.toFixed(3)}x`}
-                    />
-                )}
-            />
-        </Menu.MenuGroup>
-    );
-};
+    overlay.className = `${PREFIX}-overlay`;
+    lens.className = `${PREFIX}-lens${settings.store.square ? ` ${PREFIX}-square` : ""}`;
+    if (settings.store.nearestNeighbour) lens.classList.add(`${PREFIX}-nearest`);
+    content.className = `${PREFIX}-content`;
+    content.style.width = `${rect.width * zoom}px`;
+    content.style.height = `${rect.height * zoom}px`;
+    content.style.left = `${size / 2 - (x - rect.left) * zoom}px`;
+    content.style.top = `${size / 2 - (y - rect.top) * zoom}px`;
+    content.setAttribute("draggable", "false");
+    if (isVideo) {
+        const video = content as HTMLVideoElement;
+        video.src = sourceFor(media);
+        video.muted = true;
+        video.loop = true;
+        video.autoplay = true;
+        video.playsInline = true;
+        video.currentTime = media.currentTime;
+        void video.play().catch(() => {});
+    } else {
+        (content as HTMLImageElement).src = sourceFor(media);
+        (content as HTMLImageElement).alt = "";
+    }
+
+    lens.style.width = `${size}px`;
+    lens.style.height = `${size}px`;
+    lens.style.left = `${x - size / 2}px`;
+    lens.style.top = `${y - size / 2}px`;
+    lens.append(content);
+    overlay.append(lens);
+    document.body.append(overlay);
+    return { overlay, lens, content, media, zoom, size };
+}
+
+let active: ReturnType<typeof createLens> | undefined;
+let middleDown = false;
+
+function mediaFromEvent(event: MouseEvent): Media | undefined {
+    for (const target of event.composedPath()) {
+        if (target instanceof HTMLImageElement && target.complete && target.naturalWidth) return target;
+        if (target instanceof HTMLVideoElement && target.videoWidth) return target;
+    }
+}
+
+function moveLens(x: number, y: number) {
+    if (!active) return;
+    const { lens, content, media, zoom, size } = active;
+    const rect = media.getBoundingClientRect();
+    lens.style.left = `${x - size / 2}px`;
+    lens.style.top = `${y - size / 2}px`;
+    content.style.left = `${size / 2 - (x - rect.left) * zoom}px`;
+    content.style.top = `${size / 2 - (y - rect.top) * zoom}px`;
+}
+
+function stopLens() {
+    middleDown = false;
+    active?.overlay.remove();
+    active = undefined;
+}
+
+function onMouseDown(event: MouseEvent) {
+    if (event.button !== 1) return;
+    const media = mediaFromEvent(event);
+    if (!media) return;
+    // Suppress the browser's middle-click autoscroll, without touching Discord's left-click path.
+    event.preventDefault();
+    stopLens();
+    middleDown = true;
+    active = createLens(media, event.clientX, event.clientY);
+}
+
+function onMouseMove(event: MouseEvent) {
+    if (middleDown) moveLens(event.clientX, event.clientY);
+}
+
+function onWheel(event: WheelEvent) {
+    if (!middleDown || !active) return;
+    event.preventDefault();
+    const direction = settings.store.invertScroll ? -1 : 1;
+    const delta = event.deltaY / 100 * direction * settings.store.zoomSpeed;
+    if (event.shiftKey) {
+        active.size = Math.max(50, Math.min(1000, active.size + delta * 10));
+        active.lens.style.width = `${active.size}px`;
+        active.lens.style.height = `${active.size}px`;
+    } else {
+        active.zoom = Math.max(1, Math.min(50, active.zoom + delta));
+        active.content.style.width = `${active.media.getBoundingClientRect().width * active.zoom}px`;
+        active.content.style.height = `${active.media.getBoundingClientRect().height * active.zoom}px`;
+    }
+    if (settings.store.saveZoomValues) {
+        settings.store.zoom = active.zoom;
+        settings.store.size = active.size;
+    }
+    moveLens(event.clientX, event.clientY);
+}
 
 export default definePlugin({
     name: "ImageZoomMiddleClick",
-    description: "ImageZoom activated with the middle mouse button. Disable the built-in ImageZoom plugin while using this plugin.",
+    description: "Shows a zoom lens while holding the middle mouse button over media. Discord's normal image viewer controls remain untouched.",
     tags: ["Media", "Utility"],
     authors: [Devs.Aria],
-    searchTerms: ["ImageUtilities"],
-
-    managedStyle,
-
-    patches: [
-        {
-            find: "disableArrowKeySeek:!0",
-            replacement: [
-                {
-                    match: /useFullWidth:!0,shouldLink:/,
-                    replace: `id:"${ELEMENT_ID}",$&`
-                },
-                {
-                    match: /(?<=null!=(\i)\?.{0,20})\i(?:\.\i)?,{children:\1/, // TODO: (?:\.\i)? is stable compat
-                    replace: "'div',{onClick:e=>e.target instanceof Element&&!e.target.closest('button,[role=button],a,[aria-label]')&&e.stopPropagation(),children:$1"
-                }
-            ]
-        },
-        // Keep the native media viewer controls available after Discord zooms the image.
-        {
-            find: '="FOCUS_SENSITIVE",',
-            replacement: {
-                match: /(?<=\[\i\.\i]:)\i&&!\i&&"PINNED"!==\i/,
-                replace: "false"
-            }
-        },
-        {
-            find: ".handleImageLoad)",
-            replacement: [
-                {
-                    match: /placeholderVersion:\i,(?=.{0,50}children:)/,
-                    replace: "...$self.makeProps(this),$&"
-                },
-
-                {
-                    match: /componentDidMount\(\){/,
-                    replace: "$&$self.renderMagnifier(this);",
-                },
-
-                {
-                    match: /componentWillUnmount\(\){/,
-                    replace: "$&$self.unMountMagnifier();"
-                },
-
-                {
-                    match: /componentDidUpdate\(\i\){/,
-                    replace: "$&$self.updateMagnifier(this);"
-                }
-            ]
-        }
-    ],
-
     settings,
-    contextMenus: {
-        "image-context": imageContextMenuPatch
-    },
-
-    // to stop from rendering twice /shrug
-    currentMagnifierElement: null as React.FunctionComponentElement<MagnifierProps & JSX.IntrinsicAttributes> | null,
-    element: null as HTMLDivElement | null,
-
-    Magnifier,
-    root: null as Root | null,
-    makeProps(instance) {
-        return {
-            onMouseOver: () => this.onMouseOver(instance),
-            onMouseOut: () => this.onMouseOut(instance),
-            onMouseDown: (e: React.MouseEvent) => this.onMouseDown(e, instance),
-            onMouseUp: () => this.onMouseUp(instance),
-            id: instance.props.id,
-        };
-    },
-
-    renderMagnifier(instance) {
-        try {
-            if (instance.props.id === ELEMENT_ID) {
-                if (!this.currentMagnifierElement) {
-                    this.currentMagnifierElement = <Magnifier size={settings.store.size} zoom={settings.store.zoom} instance={instance} />;
-                    this.root = createRoot(this.element!);
-                    this.root.render(this.currentMagnifierElement);
-                }
-            }
-        } catch (error) {
-            new Logger("ImageZoomMiddleClick").error("Failed to render magnifier:", error);
-        }
-    },
-
-    updateMagnifier(instance) {
-        this.unMountMagnifier();
-        this.renderMagnifier(instance);
-    },
-
-    unMountMagnifier() {
-        this.root?.unmount();
-        this.currentMagnifierElement = null;
-        this.root = null;
-    },
-
-    onMouseOver(instance) {
-        instance.setState((state: any) => ({ ...state, mouseOver: true }));
-    },
-    onMouseOut(instance) {
-        instance.setState((state: any) => ({ ...state, mouseOver: false }));
-    },
-    onMouseDown(e: React.MouseEvent, instance) {
-        if (e.button === 1 /* middle */) {
-            e.preventDefault();
-            instance.setState((state: any) => ({ ...state, mouseDown: true }));
-        }
-    },
-    onMouseUp(instance) {
-        instance.setState((state: any) => ({ ...state, mouseDown: false }));
-    },
-
+    managedStyle,
     start() {
-        this.element = document.createElement("div");
-        this.element.classList.add("MagnifierContainer");
-        document.body.appendChild(this.element);
+        document.addEventListener("mousedown", onMouseDown);
+        document.addEventListener("mousemove", onMouseMove);
+        document.addEventListener("mouseup", stopLens);
+        document.addEventListener("wheel", onWheel, { passive: false });
+        window.addEventListener("blur", stopLens);
     },
-
     stop() {
-        // so componenetWillUnMount gets called if Magnifier component is still alive
-        this.root && this.root.unmount();
-        this.element?.remove();
+        document.removeEventListener("mousedown", onMouseDown);
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", stopLens);
+        document.removeEventListener("wheel", onWheel);
+        window.removeEventListener("blur", stopLens);
+        stopLens();
     }
 });
