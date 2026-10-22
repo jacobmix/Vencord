@@ -38,7 +38,7 @@ function getFullImageUrl(src: unknown): string | null {
 }
 
 const imageContextMenuPatch: NavContextMenuPatchCallback = (children, props) => {
-    const url = getFullImageUrl(props?.src);
+    const url = getFullImageUrl(props?.src || props?.href);
     if (!url) return;
 
     children.push(
@@ -61,3 +61,4 @@ export default definePlugin({
         "image-context": imageContextMenuPatch,
     },
 });
+
