@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { NavContextMenuPatchCallback } from "@api/ContextMenu";
+import { findGroupChildrenByChildId, NavContextMenuPatchCallback } from "@api/ContextMenu";
 import { OpenExternalIcon } from "@components/Icons";
 import definePlugin from "@utils/types";
 import { Menu } from "@webpack/common";
@@ -20,9 +20,12 @@ function getFullImageUrl(src: unknown): string | null {
 
     try {
         const url = new URL(src);
-        if (url.protocol !== "https:" || !DISCORD_IMAGE_HOSTS.has(url.hostname.toLowerCase())) return null;
+        if (url.protocol !== "https:" && url.protocol !== "http:") return null;
 
-        if (url.hostname.toLowerCase() === "media.discordapp.net" && url.pathname.startsWith("/attachments/"))
+        const hostname = url.hostname.toLowerCase();
+        if (!DISCORD_IMAGE_HOSTS.has(hostname)) return url.toString();
+
+        if (hostname === "media.discordapp.net" && url.pathname.startsWith("/attachments/"))
             url.hostname = "cdn.discordapp.com";
 
         for (const parameter of ["width", "height", "size", "format", "quality", ""]) {
@@ -41,15 +44,25 @@ const imageContextMenuPatch: NavContextMenuPatchCallback = (children, props) => 
     const url = getFullImageUrl(
         props?.src || props?.href || props?.target?.src || props?.target?.href || viewerImage?.currentSrc || viewerImage?.src || viewerVideo?.currentSrc
     );
+    if (!url) return;
 
-    children.push(
+    const menuItem = (
         <Menu.MenuItem
+            key="open-full-image-in-browser"
             id="open-full-image-in-browser"
             label="Open Full Image in Browser"
             leadingAccessory={{ type: "icon", icon: OpenExternalIcon }}
-            action={() => url && open(url, "_blank")}
+            action={() => open(url, "_blank")}
         />
     );
+
+    const mediaLinkGroup = findGroupChildrenByChildId("open-native-link", children);
+    if (mediaLinkGroup) {
+        const openMediaLinkIndex = mediaLinkGroup.findIndex(child => child?.props?.id === "open-native-link");
+        mediaLinkGroup.splice(openMediaLinkIndex + 1, 0, menuItem);
+    } else {
+        children.push(menuItem);
+    }
 };
 
 export default definePlugin({
