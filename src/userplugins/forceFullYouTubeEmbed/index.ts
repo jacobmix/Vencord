@@ -1,6 +1,16 @@
-import definePlugin, { PluginNative } from "@utils/types";
+import { definePluginSettings } from "@api/Settings";
+import definePlugin, { PluginNative, OptionType } from "@utils/types";
 
 const Native = VencordNative.pluginHelpers.ForceFullYouTubeEmbed as PluginNative<typeof import("./native")>;
+
+const settings = definePluginSettings({
+    useLightWork: {
+        type: OptionType.BOOLEAN,
+        description: "Load the experimental LightWork legacy YouTube player UI inside embeds. Leave off while testing playback stability.",
+        default: false,
+        restartNeeded: true
+    }
+});
 
 const STYLE_ID = "vc-force-full-youtube-embed";
 const FRAME_SELECTOR = [
@@ -10,7 +20,7 @@ const FRAME_SELECTOR = [
 const MESSAGE_KEY = "__FORCE_FULL_YOUTUBE_EMBED_DIAGNOSTIC__";
 
 const PORTRAIT_EMBED_CSS = `
-/* Give Shorts embeds a landscape-sized viewport, matching normal video embeds. */
+/* Widen portrait Shorts cards and give their player a 16:9 viewport. */
 article[class*="embedFull"]:has([class*="imageWrapper"][style*="253 / 450"]),
 article[class*="embedFull"]:has(iframe[src*="/embed/"][width="253"][height="450"]) {
     width: min(432px, 100%) !important;
@@ -55,14 +65,14 @@ article[class*="embedFull"]:has([class*="imageWrapper"][style*="253 / 450"]) [cl
 }
 
 article[class*="embedFull"]:has(iframe[src*="/embed/"][width="253"][height="450"]) [class*="embedMedia"] {
+    width: 400px !important;
+    max-width: 100% !important;
     max-height: 225px !important;
-}
-
-article[class*="embedFull"]:has(iframe[src*="/embed/"][width="253"][height="450"]) [class*="embedVideo"] {
-    padding-bottom: 56.25% !important;
+    aspect-ratio: 16 / 9 !important;
 }
 
 article[class*="embedFull"]:has(iframe[src*="/embed/"][width="253"][height="450"]) iframe[src*="/embed/"] {
+    display: block !important;
     width: 400px !important;
     height: 225px !important;
     max-width: 100% !important;
@@ -75,7 +85,6 @@ let messageListener: ((event: MessageEvent) => void) | undefined;
 
 function addPortraitEmbedStyle() {
     if (document.getElementById(STYLE_ID)) return;
-
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = PORTRAIT_EMBED_CSS;
@@ -89,12 +98,34 @@ function removePortraitEmbedStyle() {
 function isYouTubeEmbed(iframe: HTMLIFrameElement): boolean {
     try {
         const url = new URL(iframe.getAttribute("src") ?? "", location.href);
-        return (url.hostname === "youtube.com" || url.hostname.endsWith(".youtube.com")
-            || url.hostname === "youtube-nocookie.com" || url.hostname.endsWith(".youtube-nocookie.com"))
+        const host = url.hostname.toLowerCase();
+        return (host === "youtube.com" || host.endsWith(".youtube.com")
+            || host === "youtube-nocookie.com" || host.endsWith(".youtube-nocookie.com"))
             && url.pathname.startsWith("/embed/");
     } catch {
         return false;
     }
+}
+
+/**
+ * `allow-fullscreen` is NOT a valid iframe sandbox token. Fullscreen belongs
+ * in the Permissions Policy `allow` attribute instead. Keep all other sandbox
+ * restrictions intact.
+ */
+function removeInvalidSandboxToken(iframe: HTMLIFrameElement): boolean {
+    const sandbox = iframe.getAttribute("sandbox");
+    if (sandbox === null) return false;
+
+    const tokens = sandbox.split(/\s+/).filter(Boolean);
+    const filtered = tokens.filter(token => token.toLowerCase() !== "allow-fullscreen");
+    if (filtered.length === tokens.length) return false;
+
+    iframe.setAttribute("sandbox", filtered.join(" "));
+    console.warn("[ForceFullYouTubeEmbed] Removed invalid 'allow-fullscreen' token from iframe sandbox; retained other sandbox restrictions.", {
+        before: sandbox,
+        after: iframe.getAttribute("sandbox")
+    });
+    return true;
 }
 
 function addFullscreenPermission(iframe: HTMLIFrameElement): boolean {
@@ -105,7 +136,7 @@ function addFullscreenPermission(iframe: HTMLIFrameElement): boolean {
     if (fullscreenIndex === -1) {
         directives.push("fullscreen");
     } else {
-        // Avoid leaving an explicit restrictive fullscreen directive in place.
+        // Replace any restrictive fullscreen directive (for example fullscreen 'none').
         directives[fullscreenIndex] = "fullscreen";
     }
 
@@ -113,15 +144,16 @@ function addFullscreenPermission(iframe: HTMLIFrameElement): boolean {
     let changed = nextAllow !== originalAllow;
     if (changed) iframe.setAttribute("allow", nextAllow);
 
-    if (!iframe.hasAttribute("allowfullscreen")) {
-        iframe.setAttribute("allowfullscreen", "");
+    // Do not add the legacy allowfullscreen attribute: Chromium warns when it is
+    // combined with `allow`, and `allow` is the authoritative Permissions Policy.
+    if (iframe.hasAttribute("allowfullscreen")) {
+        iframe.removeAttribute("allowfullscreen");
         changed = true;
     }
-    if (!iframe.hasAttribute("webkitallowfullscreen")) {
-        iframe.setAttribute("webkitallowfullscreen", "");
+    if (iframe.hasAttribute("webkitallowfullscreen")) {
+        iframe.removeAttribute("webkitallowfullscreen");
         changed = true;
     }
-    iframe.allowFullscreen = true;
 
     return changed;
 }
@@ -129,42 +161,42 @@ function addFullscreenPermission(iframe: HTMLIFrameElement): boolean {
 function prepareYouTubeIframe(iframe: HTMLIFrameElement) {
     if (!isYouTubeEmbed(iframe)) return;
 
-    let nextSrc = iframe.getAttribute("src") ?? "";
-    let url: URL;
+    removeInvalidSandboxToken(iframe);
+    addFullscreenPermission(iframe);
+
+    const src = iframe.getAttribute("src") ?? "";
     try {
-        url = new URL(nextSrc, location.href);
-    } catch {
-        return;
+        const url = new URL(src, location.href);
+        let urlChanged = false;
+
+        // YouTube's `fs=0` explicitly hides its fullscreen button.
+        if (url.searchParams.get("fs") === "0") {
+            url.searchParams.set("fs", "1");
+            urlChanged = true;
+        }
+        if (url.searchParams.get("controls") === "0") {
+            url.searchParams.set("controls", "1");
+            urlChanged = true;
+        }
+
+        // Avoid reloading every iframe simply because its permissions changed.
+        // Only change src when YouTube explicitly disabled controls/fullscreen.
+        if (urlChanged && iframe.dataset.vcFfytUrlPatched !== "1") {
+            iframe.dataset.vcFfytUrlPatched = "1";
+            iframe.setAttribute("src", url.toString());
+            console.info("[ForceFullYouTubeEmbed] Enabled YouTube embed controls in iframe URL.", url.toString());
+        }
+    } catch (error) {
+        console.warn("[ForceFullYouTubeEmbed] Could not inspect YouTube iframe URL:", error);
     }
 
-    let changed = addFullscreenPermission(iframe);
-
-    // YouTube documents fs=0 as the switch that hides its fullscreen button.
-    if (url.searchParams.get("fs") === "0") {
-        url.searchParams.set("fs", "1");
-        changed = true;
-    }
-    if (url.searchParams.get("controls") === "0") {
-        url.searchParams.set("controls", "1");
-        changed = true;
-    }
-
-    const rewrittenSrc = url.toString();
-    if (rewrittenSrc !== nextSrc) {
-        nextSrc = rewrittenSrc;
-        changed = true;
-    }
-
-    // Permissions Policy is applied when the iframe's browsing context is created.
-    // If we had to add permissions after Discord inserted the iframe, reload it once
-    // so the new policy is applied and the frame preload can run from document-start.
-    if (changed && iframe.dataset.vcFfytPermissionReloaded !== "1") {
-        iframe.dataset.vcFfytPermissionReloaded = "1";
-        iframe.setAttribute("src", nextSrc);
-        console.debug("[ForceFullYouTubeEmbed] Updated YouTube iframe permissions/parameters", {
-            src: nextSrc,
+    if (!iframe.dataset.vcFfytInspected) {
+        iframe.dataset.vcFfytInspected = "1";
+        console.info("[ForceFullYouTubeEmbed] Prepared YouTube iframe:", {
+            src: iframe.getAttribute("src"),
             allow: iframe.getAttribute("allow"),
-            allowFullscreen: iframe.allowFullscreen
+            sandbox: iframe.getAttribute("sandbox"),
+            allowFullscreenLegacyRemoved: !iframe.hasAttribute("allowfullscreen")
         });
     }
 }
@@ -173,7 +205,6 @@ function scanForYouTubeIframes(root: ParentNode = document) {
     if (root instanceof HTMLIFrameElement && isYouTubeEmbed(root)) {
         prepareYouTubeIframe(root);
     }
-
     root.querySelectorAll?.(FRAME_SELECTOR).forEach(element => {
         if (element instanceof HTMLIFrameElement) prepareYouTubeIframe(element);
     });
@@ -181,15 +212,14 @@ function scanForYouTubeIframes(root: ParentNode = document) {
 
 function startIframeObserver() {
     if (observer) return;
-
     scanForYouTubeIframes();
+
     observer = new MutationObserver(records => {
         for (const record of records) {
             if (record.type === "attributes" && record.target instanceof HTMLIFrameElement) {
                 prepareYouTubeIframe(record.target);
                 continue;
             }
-
             for (const node of record.addedNodes) {
                 if (node instanceof HTMLElement) scanForYouTubeIframes(node);
             }
@@ -200,7 +230,7 @@ function startIframeObserver() {
         subtree: true,
         childList: true,
         attributes: true,
-        attributeFilter: ["src", "allow", "allowfullscreen"]
+        attributeFilter: ["src", "allow", "allowfullscreen", "sandbox"]
     });
 }
 
@@ -211,7 +241,6 @@ function stopIframeObserver() {
 
 function listenForFrameDiagnostics() {
     if (messageListener) return;
-
     messageListener = event => {
         if (event.origin !== "https://www.youtube.com" &&
             event.origin !== "https://youtube.com" &&
@@ -220,14 +249,12 @@ function listenForFrameDiagnostics() {
 
         const data = event.data;
         if (!data || data[MESSAGE_KEY] !== true) return;
-
         console.info("[ForceFullYouTubeEmbed] YouTube frame diagnostic:", {
             status: data.status,
             href: data.href,
             detail: data.detail
         });
     };
-
     window.addEventListener("message", messageListener);
 }
 
@@ -239,24 +266,23 @@ function stopListeningForFrameDiagnostics() {
 
 export default definePlugin({
     name: "ForceFullYouTubeEmbed",
-    description: "Restores classic YouTube embed controls, grants fullscreen to Shorts embeds, and widens portrait embeds.",
+    description: "Enables fullscreen permissions for YouTube embeds and widens Shorts; LightWork legacy UI is optional.",
     authors: [{ name: "Custom UserPlugin", id: 0n }],
     tags: ["Media", "Utility"],
     requiresRestart: true,
+    settings,
 
     async start() {
         addPortraitEmbedStyle();
         listenForFrameDiagnostics();
 
         try {
-            const status = await Native.start();
+            const status = await Native.start(settings.store.useLightWork);
             console.info("[ForceFullYouTubeEmbed] Native preload registered:", status);
         } catch (error) {
-            console.error("[ForceFullYouTubeEmbed] Could not register the YouTube frame preload. The iframe permission fixes will still run, but LightWork will not load:", error);
+            console.error("[ForceFullYouTubeEmbed] Failed to register the YouTube frame preload:", error);
         }
 
-        // Register the frame preload first, then scan. Any existing Shorts iframe
-        // that was created before plugin startup is refreshed once below.
         startIframeObserver();
     },
 
@@ -264,7 +290,6 @@ export default definePlugin({
         stopIframeObserver();
         removePortraitEmbedStyle();
         stopListeningForFrameDiagnostics();
-
         try {
             await Native.stop();
         } catch (error) {
