@@ -1,16 +1,13 @@
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { app, session, type IpcMainInvokeEvent } from "electron";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { app, session } from "electron";
 
-const SOURCE_URL = "https://raw.githubusercontent.com/YoutubeQuirks/LightWork/refs/heads/main/LightWork.user.js";
-const PRELOAD_ID = "vencord-force-full-youtube-embed-v2";
-const MESSAGE_KEY = "__FORCE_FULL_YOUTUBE_EMBED_DIAGNOSTIC__";
+const SOURCE_COMMIT = "9ed4f14df6606ebddea1ca3228f1964b3582496f";
+const SOURCE_URL = `https://raw.githubusercontent.com/YoutubeQuirks/LightWork/${SOURCE_COMMIT}/LightWork.user.js`;
+const PRELOAD_ID = "vencord-force-full-youtube-embed-v3";
+const MESSAGE_KEY = "__FORCE_FULL_YOUTUBE_EMBED_V3_DIAGNOSTIC__";
 
 let registeredPreloadId: string | undefined;
-let lightWorkFilePath: string | undefined;
-let preloadFilePath: string | undefined;
-let lightWorkVersion: string | undefined;
-let activeLightWork = false;
 
 function isExpectedLightWork(source: string): boolean {
     return source.startsWith("/*\nCopyright © 2026 YoutubeQuirks")
@@ -18,12 +15,12 @@ function isExpectedLightWork(source: string): boolean {
         && source.includes("LightWork_init();");
 }
 
-async function getLightWorkSource(lightWorkFile: string): Promise<string> {
+async function getLightWorkSource(cachePath: string): Promise<string> {
     try {
-        const cached = await readFile(lightWorkFile, "utf8");
+        const cached = await readFile(cachePath, "utf8");
         if (isExpectedLightWork(cached)) return cached;
     } catch {
-        // No cached copy yet; download the upstream source below.
+        // Cache miss: fetch the pinned upstream project URL below.
     }
 
     const response = await fetch(SOURCE_URL, {
@@ -31,25 +28,23 @@ async function getLightWorkSource(lightWorkFile: string): Promise<string> {
         signal: AbortSignal.timeout(20_000),
         cache: "no-store"
     });
-    if (!response.ok) throw new Error(`Could not download LightWork (HTTP ${response.status}).`);
+    if (!response.ok) throw new Error(`LightWork download failed (HTTP ${response.status}).`);
 
     const source = await response.text();
     if (source.length > 1_500_000 || !isExpectedLightWork(source)) {
-        throw new Error("The downloaded LightWork source failed its sanity checks.");
+        throw new Error("Downloaded LightWork source did not pass the expected-source checks.");
     }
-    await writeFile(lightWorkFile, source, "utf8");
+
+    await writeFile(cachePath, source, "utf8");
     return source;
 }
 
-function makeFramePreload(lightWorkSource?: string): string {
-    const serializedSource = JSON.stringify(lightWorkSource ?? null);
-    const serializedKey = JSON.stringify(MESSAGE_KEY);
-
-    return `/* ForceFullYouTubeEmbed YouTube frame preload */
+function makeFramePreload(lightWorkSource: string): string {
+    return `/* ForceFullYouTubeEmbed v3 YouTube-frame preload */
 'use strict';
 
-const DIAG_KEY = ${serializedKey};
-const LIGHTWORK_SOURCE = ${serializedSource};
+const DIAG_KEY = ${JSON.stringify(MESSAGE_KEY)};
+const LIGHTWORK_SOURCE = ${JSON.stringify(lightWorkSource)};
 const report = (status, detail) => {
     try {
         window.parent.postMessage({
@@ -61,148 +56,107 @@ const report = (status, detail) => {
     } catch (_) { }
 };
 
-report('frame-preload-ran', 'fullscreenEnabled=' + document.fullscreenEnabled);
+report('frame-preload-ran', 'document.fullscreenEnabled=' + document.fullscreenEnabled);
 
-if (!LIGHTWORK_SOURCE) {
-    report('LightWork-disabled', 'Running the native YouTube player without the legacy UI patch.');
-} else {
-    try {
-        const { contextBridge } = require('electron');
-        if (typeof contextBridge?.executeInMainWorld !== 'function') {
-            report('executeInMainWorld-unavailable', 'This Electron build does not expose contextBridge.executeInMainWorld.');
-            console.error('[ForceFullYouTubeEmbed] contextBridge.executeInMainWorld is unavailable.');
-        } else {
-            contextBridge.executeInMainWorld({
-                func: (lightWorkSource, diagnosticKey) => {
-                    const reportFromPage = (status, detail) => {
-                        try {
-                            window.parent.postMessage({
-                                [diagnosticKey]: true,
-                                status,
-                                href: location.href,
-                                detail: detail == null ? null : String(detail)
-                            }, '*');
-                        } catch (_) { }
-                    };
-
-                    reportFromPage('main-world-injection-started', 'fullscreenEnabled=' + document.fullscreenEnabled);
-                    if (window._yt_player) {
-                        reportFromPage('LightWork-skipped-too-late', 'YouTube player bootstrap already exists; skipping rather than trying to reload the iframe.');
-                        return;
-                    }
-
-                    window.__FORCE_FULL_YOUTUBE_EMBED__ = {
-                        injectedAt: Date.now(),
-                        href: location.href,
-                        lightWorkLoaded: false
-                    };
-                    window.addEventListener('LightWorkLoaded', () => {
-                        window.__FORCE_FULL_YOUTUBE_EMBED__.lightWorkLoaded = true;
-                        reportFromPage('LightWorkLoaded', 'Legacy player bootstrap completed.');
-                    }, { once: true });
-
+try {
+    const { contextBridge } = require('electron');
+    if (typeof contextBridge?.executeInMainWorld !== 'function') {
+        report('executeInMainWorld-unavailable', 'This Electron build does not expose contextBridge.executeInMainWorld.');
+        console.error('[ForceFullYouTubeEmbed] contextBridge.executeInMainWorld is unavailable.');
+    } else {
+        contextBridge.executeInMainWorld({
+            func: (source, diagnosticKey) => {
+                const reportFromPage = (status, detail) => {
                     try {
-                        (0, eval)(lightWorkSource);
-                        reportFromPage('LightWork-script-evaluated');
-                    } catch (error) {
-                        reportFromPage('LightWork-eval-error', error?.stack || error);
-                        console.error('[ForceFullYouTubeEmbed] LightWork evaluation failed:', error);
-                    }
-                },
-                args: [LIGHTWORK_SOURCE, DIAG_KEY]
-            });
-        }
-    } catch (error) {
-        report('executeInMainWorld-threw', error?.stack || error);
-        console.error('[ForceFullYouTubeEmbed] executeInMainWorld failed:', error);
+                        window.parent.postMessage({
+                            [diagnosticKey]: true,
+                            status,
+                            href: location.href,
+                            detail: detail == null ? null : String(detail)
+                        }, '*');
+                    } catch (_) { }
+                };
+
+                if (window.__FORCE_FULL_YOUTUBE_EMBED_V3__) {
+                    reportFromPage('LightWork-already-injected');
+                    return;
+                }
+                if (window._yt_player) {
+                    reportFromPage('LightWork-skipped-player-already-started', 'Player bootstrap already exists; no forced reload was attempted.');
+                    return;
+                }
+
+                window.__FORCE_FULL_YOUTUBE_EMBED_V3__ = { startedAt: Date.now(), loaded: false };
+                window.addEventListener('LightWorkLoaded', () => {
+                    window.__FORCE_FULL_YOUTUBE_EMBED_V3__.loaded = true;
+                    reportFromPage('LightWorkLoaded', 'Legacy embedded player started loading.');
+                }, { once: true });
+
+                // Disable upstream's retry navigation. A late injection is reported,
+                // not handled by reloading the Discord iframe in a loop.
+                source = source.replace(
+                    /let LightWork_retryInjection\\s*=\\s*true\\s*;/,
+                    'let LightWork_retryInjection = false;'
+                );
+
+                try {
+                    (0, eval)(source);
+                    reportFromPage('LightWork-script-evaluated');
+                } catch (error) {
+                    reportFromPage('LightWork-eval-error', error?.stack || error);
+                    console.error('[ForceFullYouTubeEmbed] LightWork evaluation failed:', error);
+                }
+            },
+            args: [LIGHTWORK_SOURCE, DIAG_KEY]
+        });
     }
+} catch (error) {
+    report('main-world-injection-error', error?.stack || error);
+    console.error('[ForceFullYouTubeEmbed] Main-world injection failed:', error);
 }
 `;
 }
 
-async function currentStatus() {
-    const ses = session.defaultSession;
-    let registeredScripts: unknown = "getPreloadScripts unavailable";
-    try {
-        registeredScripts = typeof ses.getPreloadScripts === "function"
-            ? ses.getPreloadScripts().map(script => ({
-                id: script.id,
-                type: script.type,
-                filePath: script.filePath,
-                matches: script.matches
-            }))
-            : registeredScripts;
-    } catch (error) {
-        registeredScripts = `getPreloadScripts failed: ${String(error)}`;
-    }
+/**
+ * Vencord injects IpcMainInvokeEvent as the first argument of every native
+ * function. The user option is therefore the SECOND argument. Returning only
+ * a string avoids Electron structured-clone failures from complex status data.
+ */
+export async function start(_event: IpcMainInvokeEvent, enableLightWork = false): Promise<string> {
+    if (!enableLightWork) return "skipped: LightWork is disabled";
+    if (registeredPreloadId) return "already registered";
 
-    let cachedBytes: number | null = null;
-    if (lightWorkFilePath) {
-        try {
-            cachedBytes = (await stat(lightWorkFilePath)).size;
-        } catch { }
-    }
-
-    return {
-        electronVersion: process.versions.electron,
-        registerPreloadScriptAvailable: typeof ses.registerPreloadScript === "function",
-        registeredPreloadId: registeredPreloadId ?? null,
-        lightWorkEnabled: activeLightWork,
-        lightWorkVersion: activeLightWork ? (lightWorkVersion ?? null) : null,
-        lightWorkCachePath: lightWorkFilePath ?? null,
-        lightWorkCacheBytes: cachedBytes,
-        preloadFilePath: preloadFilePath ?? null,
-        registeredScripts
-    };
-}
-
-export async function start(enableLightWork = false) {
-    if (registeredPreloadId) return currentStatus();
     await app.whenReady();
-
     const ses = session.defaultSession;
     if (typeof ses.registerPreloadScript !== "function") {
-        throw new Error(`Electron ${process.versions.electron} does not expose Session.registerPreloadScript.`);
+        throw new Error(`Electron ${process.versions.electron} does not support Session.registerPreloadScript.`);
     }
 
-    const pluginDataDir = join(app.getPath("userData"), "..", "Vencord", "forceFullYouTubeEmbed");
-    lightWorkFilePath = join(pluginDataDir, "LightWork.user.js");
-    preloadFilePath = join(pluginDataDir, "youtube-frame-preload.js");
+    const dataDir = join(app.getPath("userData"), "..", "Vencord", "forceFullYouTubeEmbed");
+    const sourcePath = join(dataDir, `LightWork-${SOURCE_COMMIT}.user.js`);
+    const preloadPath = join(dataDir, "youtube-frame-preload-v3.js");
+    await mkdir(dataDir, { recursive: true });
 
-    await mkdir(pluginDataDir, { recursive: true });
+    let source = await getLightWorkSource(sourcePath);
+    // Avoid any upstream navigation retry if the player bundle has loaded too early.
+    source = source.replace(
+        /let LightWork_retryInjection\s*=\s*true\s*;/,
+        "let LightWork_retryInjection = false;"
+    );
+    await writeFile(preloadPath, makeFramePreload(source), "utf8");
 
-    let source: string | undefined;
-    lightWorkVersion = undefined;
-    activeLightWork = enableLightWork;
-    if (enableLightWork) {
-        source = await getLightWorkSource(lightWorkFilePath);
-        lightWorkVersion = source.match(/@version\s+([^\s]+)/)?.[1] ?? "unknown";
-
-        // LightWork's upstream default retries by navigating the iframe if it
-        // believes injection was late. In a chat embed that can create a reload
-        // loop, so disable that automatic retry; diagnostics report the cause.
-        source = source.replace(
-            /let LightWork_retryInjection\s*=\s*true\s*;/,
-            "let LightWork_retryInjection = false;"
-        );
-    }
-
-    await writeFile(preloadFilePath, makeFramePreload(source), "utf8");
-
-    // Replace a stale registration left behind by a prior plugin reload.
+    // Remove any previous registration with our v3 ID if the plugin restarted.
     try {
-        const existing = typeof ses.getPreloadScripts === "function"
-            ? ses.getPreloadScripts().find(script => script.id === PRELOAD_ID)
-            : undefined;
-        if (existing) ses.unregisterPreloadScript(existing.id);
+        const previous = ses.getPreloadScripts().find(script => script.id === PRELOAD_ID);
+        if (previous) ses.unregisterPreloadScript(previous.id);
     } catch (error) {
-        console.warn("[ForceFullYouTubeEmbed] Could not inspect a previous preload registration:", error);
+        console.warn("[ForceFullYouTubeEmbed] Could not inspect an old v3 preload registration:", String(error));
     }
 
     registeredPreloadId = ses.registerPreloadScript({
         type: "frame",
         id: PRELOAD_ID,
-        filePath: preloadFilePath,
+        filePath: preloadPath,
         matches: [
             "https://youtube.com/embed/*",
             "https://*.youtube.com/embed/*",
@@ -211,28 +165,23 @@ export async function start(enableLightWork = false) {
         ]
     });
 
-    console.info("[ForceFullYouTubeEmbed] Registered YouTube frame preload", {
+    console.info("[ForceFullYouTubeEmbed] Registered optional LightWork preload", {
         electronVersion: process.versions.electron,
         id: registeredPreloadId,
-        filePath: preloadFilePath,
-        lightWorkEnabled: activeLightWork,
-        lightWorkVersion
+        lightWorkCommit: SOURCE_COMMIT,
+        filePath: preloadPath
     });
 
-    return currentStatus();
+    // IMPORTANT: native IPC return values must be structured-cloneable.
+    return "registered";
 }
 
-export async function getStatus() {
-    return currentStatus();
-}
-
-export async function stop() {
-    if (!registeredPreloadId) return;
+export async function stop(_event: IpcMainInvokeEvent): Promise<string> {
+    if (!registeredPreloadId) return "not registered";
     try {
         session.defaultSession.unregisterPreloadScript(registeredPreloadId);
-        console.info("[ForceFullYouTubeEmbed] Unregistered YouTube frame preload.");
     } finally {
         registeredPreloadId = undefined;
-        activeLightWork = false;
     }
+    return "unregistered";
 }

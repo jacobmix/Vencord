@@ -1,37 +1,48 @@
-# ForceFullYouTubeEmbed (diagnostic build)
+# ForceFullYouTubeEmbed v3
 
-This Vencord userplugin adjusts YouTube embed permissions, removes the invalid `allow-fullscreen` sandbox token if it is present, enables `fs=1`/`controls=1` when explicitly disabled, and widens portrait Shorts embeds.
+A Vencord userplugin that identifies portrait YouTube embeds (such as Shorts), gives the iframe a 16:9 landscape viewport, ensures fullscreen permission is present, and adds a small parent-side fullscreen fallback control in the top-right of Shorts embeds. The fallback button fullscreenes the Discord embed container, so it works even when YouTube's own Shorts toolbar omits its fullscreen control.
 
-## Important: first test with LightWork disabled
+## Why this build is different
 
-The plugin setting **Use LightWork legacy player UI** is off by default. Keep it off for the first test. This runs YouTube's own current embed player and lets us check whether the freeze is caused by the experimental LightWork player replacement or by the Discord iframe itself.
-
-Once playback is stable, you can turn that setting on and restart Discord to test LightWork. LightWork is a beta third-party userscript; this build disables its automatic iframe-reload retry so a late injection cannot repeatedly navigate the embedded player.
+- The previous native method used the first native IPC argument as the LightWork setting. Vencord injects `IpcMainInvokeEvent` as argument 1, so the user setting must be argument 2. This build fixes that.
+- The native method now returns only a string. Vencord requires every native return value to be serializable using the structured-clone algorithm; complex Electron status objects can fail with `An object could not be cloned`.
+- LightWork is not loaded and no native preload is registered unless the user explicitly enables **Use LightWork legacy player UI**.
+- The automatic LightWork retry navigation is disabled to avoid iframe reload loops.
+- Portrait embed dimensions are applied to the iframe and its Discord wrapper, not just to a broad CSS selector.
+- A dedicated fullscreen fallback button is added over each portrait embed. It uses the browser Fullscreen API from a direct click and also serves as the exit-fullscreen control.
+- An existing `allow="autoplay; fullscreen"` is preserved. The invalid `allow-fullscreen` sandbox token is removed if present; all other sandbox restrictions remain.
 
 ## Install
 
-1. Extract this archive.
-2. Copy the `forceFullYouTubeEmbed` folder into `Vencord/src/userplugins/`.
-3. Make sure the result is `Vencord/src/userplugins/forceFullYouTubeEmbed/index.ts` and `native.ts`.
-4. Rebuild Vencord and fully restart Discord.
-5. Test a YouTube Short while **Use LightWork legacy player UI** remains off.
+1. Fully close Discord.
+2. Remove the previous `forceFullYouTubeEmbed` folder from `Vencord/src/userplugins/`.
+3. Extract this archive and copy the included `forceFullYouTubeEmbed` folder into `Vencord/src/userplugins/`.
+4. Verify the files are at:
+   - `Vencord/src/userplugins/forceFullYouTubeEmbed/index.ts`
+   - `Vencord/src/userplugins/forceFullYouTubeEmbed/native.ts`
+5. Rebuild Vencord and restart Discord.
+6. Test a Short. A new square-corners fullscreen button should appear in the top-right of the Shorts player. Click it to fullscreen the player area; click it again or press Esc to exit.
+7. The setting **Use LightWork legacy player UI** is OFF by default. Enable it only if you also want to try restoring YouTube's older built-in controls, then fully restart Discord.
 
-## What changed in this build
+## LightWork security note
 
-- `allow="fullscreen"` is the only fullscreen permission written by the plugin. The redundant legacy `allowfullscreen` attribute is removed to avoid Chromium's precedence warning.
-- The invalid `allow-fullscreen` token is removed from `sandbox`, while every other sandbox restriction is preserved.
-- The plugin no longer reloads an iframe just because its permission attributes changed. It only changes the iframe URL if `fs=0` or `controls=0` is explicitly present.
-- LightWork is optional and disabled by default. When enabled, it runs in the iframe's main world through Electron's `contextBridge.executeInMainWorld` and its upstream automatic reload retry is disabled.
-- The console reports whether the frame preload actually ran and whether LightWork loaded.
+Enabling **Use LightWork legacy player UI** downloads the open-source LightWork userscript from `YoutubeQuirks/LightWork` and executes it inside YouTube embed frames. It is an optional third-party script and is disabled by default. Review the upstream source before enabling it:
 
-## Useful console messages
+- https://github.com/YoutubeQuirks/LightWork
+- https://github.com/YoutubeQuirks/LightWork/blob/main/LightWork.user.js
 
-Filter the developer console for `ForceFullYouTubeEmbed`:
+The plugin pins LightWork to upstream commit `9ed4f14df6606ebddea1ca3228f1964b3582496f` (November 8, 2026) rather than following a moving branch. It caches that exact downloaded script in Vencord's user data directory. I inspected this source snapshot for this build; it contains YouTube-player code and no Discord token or message-reading logic. This is not a guarantee about other LightWork revisions.
 
-- `Prepared YouTube iframe` — the parent iframe was found and inspected.
-- `Removed invalid 'allow-fullscreen' token` — the bad sandbox token was found and removed.
-- `frame-preload-ran` — Electron's frame preload executed inside the YouTube iframe.
-- `LightWork-disabled` — the native YouTube player is being used (expected in the first test).
-- `LightWorkLoaded` — the legacy player successfully began loading (only when enabled).
+## Diagnostics
 
-If the video still freezes with LightWork disabled, the issue is not caused by LightWork's legacy-player patch. Send the `ForceFullYouTubeEmbed` messages and the iframe's `allow`/`sandbox` values from `Prepared YouTube iframe`.
+- `Added parent-side fullscreen fallback button to Shorts embed` confirms the replacement button was inserted.
+- `Fullscreen fallback failed` reports why the browser rejected a fullscreen request, if that happens.
+
+Open the Discord developer console and filter for `ForceFullYouTubeEmbed`.
+
+- `Applied landscape viewport to portrait YouTube embed` reports the actual iframe rectangle after the style changes.
+- `YouTube iframe inspection` reports the `fs` and `controls` query parameters and the iframe `allow` policy.
+- `LightWork preload: registered` means the native preload registration succeeded.
+- `frame-preload-ran` means Electron executed the preload inside a YouTube frame.
+- `LightWorkLoaded` means the legacy player started loading.
+- `LightWork-skipped-player-already-started` means the embed loaded before the preload could patch the player; no automatic reload is attempted.
